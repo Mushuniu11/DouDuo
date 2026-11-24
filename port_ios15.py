@@ -356,6 +356,17 @@ def main():
             proj.write_text(s2, encoding="utf-8")
             print(f"[ok] project.yml deploymentTarget -> {tgt}")
 
+    # 1b) 启动屏声明：缺 UILaunchScreen 时 iOS 会按 320x480 兼容模式整体放大渲染
+    ip = APP / "Info.plist"
+    if ip.exists():
+        s = ip.read_text(encoding="utf-8")
+        if "UILaunchScreen" not in s:
+            head, sep, tail = s.rpartition("</dict>")
+            if sep:
+                s = head + "\t<key>UILaunchScreen</key>\n\t<dict/>\n" + sep + tail
+                ip.write_text(s, encoding="utf-8")
+                print("[ok] Info.plist 补 UILaunchScreen（修复界面被放大裁切）")
+
     # 2) 兼容层
     compat = None
     for cand in (ROOT / "DYCompat.swift", ROOT / "scripts" / "DYCompat.swift"):
