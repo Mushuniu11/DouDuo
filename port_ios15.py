@@ -187,6 +187,11 @@ TEXT_REPLACEMENTS = [
 ]
 
 BLOCK_FIXES = [
+    # do { try await Task.sleep(...) } catch { return }  ->  try? ...
+    (
+        re.compile(r"do \{ try await (Task\.sleep\([^\n]*?\)) \} catch \{ return \}"),
+        lambda m: "try? await " + m.group(1),
+    ),
     # ToolbarContent 上的 .hidden(...)（iOS 26 专属）
     (
         re.compile(r"\.hidden\(onBack == nil[^\n]*\)"),
