@@ -72,7 +72,7 @@ struct DYStack<Content: View>: View {
 
 // MARK: - Tab(value:) -> tabItem + tag
 
-struct DYTab<V: Hashable, Content: View>: View {
+struct DYTabItem<V: Hashable, Content: View>: View {
     private let title: String
     private let systemImage: String
     private let value: V
@@ -139,58 +139,90 @@ struct DYContentUnavailableView<Actions: View>: View {
     }
 }
 
-// MARK: - AnyLayout（iOS 16）兼容实现：仅支持水平/垂直切换
+// MARK: - Mutex（iOS 18）兼容实现
 
-struct DYAnyLayout: Layout {
-    var horizontal: Bool
+final class DYMutex<T> {
+    private let lock = NSLock()
+    private var value: T
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        DYAnyLayout.measure(horizontal: horizontal, proposal: proposal, subviews: subviews)
+    init(_ value: T) {
+        self.value = value
     }
 
-    func placeSubviews(
-        in bounds: CGRect,
-        proposal: ProposedViewSize,
-        subviews: Subviews,
-        cache: inout ()
-    ) {
-        let count = max(subviews.count, 1)
-        if horizontal {
-            let w = bounds.width / CGFloat(count)
-            for (i, sub) in subviews.enumerated() {
-                sub.place(
-                    at: CGPoint(x: bounds.minX + w * CGFloat(i), y: bounds.minY),
-                    proposal: ProposedViewSize(width: w, height: bounds.height)
-                )
-            }
-        } else {
-            let h = bounds.height / CGFloat(count)
-            for (i, sub) in subviews.enumerated() {
-                sub.place(
-                    at: CGPoint(x: bounds.minX, y: bounds.minY + h * CGFloat(i)),
-                    proposal: ProposedViewSize(width: bounds.width, height: h)
-                )
-            }
+    func withLock<R>(_ body: (inout T) throws -> R) rethrows -> R {
+        lock.lock()
+        defer { lock.unlock() }
+        return try body(&value)
+    }
+}
+
+// MARK: - GeometryProxy.reservedRegions（iOS 27）占位实现
+
+enum DYReservedRegionKind {
+    case division
+    case occlusion
+}
+
+struct DYReservedRegion {
+    var frame: CGRect = .zero
+    var isActive: Bool = false
+}
+
+extension GeometryProxy {
+    func reservedRegions(kind: DYReservedRegionKind) -> [DYReservedRegion] {
+        []
+    }
+}
+
+// MARK: - LabeledContent（iOS 16）兼容实现
+
+struct DYLabeledContent<Label: View, Content: View>: View {
+    private let label: Label
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content, @ViewBuilder label: () -> Label) {
+        self.content = content()
+        self.label = label()
+    }
+
+    init<S: StringProtocol, V>(_ title: S, value: V) where Label == Text, Content == Text {
+        self.label = Text(String(title))
+        self.content = Text(String(describing: value))
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            label
+            Spacer(minLength: 8)
+            content
         }
     }
+}
 
-    static func measure(horizontal: Bool, proposal: ProposedViewSize, subviews: Subviews) -> CGSize {
-        var w: CGFloat = 0
-        var h: CGFloat = 0
-        for sub in subviews {
-            let s = sub.sizeThatFits(.unspecified)
-            if horizontal {
-                w += s.width
-                h = max(h, s.height)
+// MARK: - AnyLayout（iOS 16）兼容实现
+
+struct DYAnyLayoutSpec {
+    var vertical: Bool
+    var spacing: CGFloat
+
+    func callAsFunction<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        DYAnyLayoutBody(vertical: vertical, spacing: spacing, content: content())
+    }
+}
+
+struct DYAnyLayoutBody<Content: View>: View {
+    let vertical: Bool
+    let spacing: CGFloat
+    let content: Content
+
+    var body: some View {
+        Group {
+            if vertical {
+                VStack(alignment: .leading, spacing: spacing) { content }
             } else {
-                h += s.height
-                w = max(w, s.width)
+                HStack(spacing: spacing) { content }
             }
         }
-        return CGSize(
-            width: proposal.width ?? w,
-            height: proposal.height ?? h
-        )
     }
 }
 

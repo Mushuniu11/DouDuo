@@ -48,6 +48,15 @@ STRIP_TOKENS = [
     ".scrollTransition",
     ".visualEffect",
     ".defaultScrollAnchor",
+    ".scrollDismissesKeyboard",
+    ".presentationDragIndicator",
+    ".presentationCompactAdaptation",
+    ".presentationBackground",
+    ".onGeometryChange",
+    ".contentMargins",
+    ".symbolEffect",
+    ".containerBackground",
+    ".backgroundStyle",
 ]
 
 
@@ -147,6 +156,45 @@ TEXT_REPLACEMENTS = [
     ("ContentUnavailableView(", "DYContentUnavailableView("),
     (".buttonStyle(.glass)", ".buttonStyle(.plain)"),
     ("@Bindable ", "@ObservedObject "),
+    ("Mutex(", "DYMutex("),
+    ("Mutex<", "DYMutex<"),
+    ("URL.temporaryDirectory", "FileManager.default.temporaryDirectory"),
+]
+
+REGEX_REPLACEMENTS = [
+    # Task.sleep(for: .milliseconds(x)) -> nanoseconds
+    (
+        re.compile(r"Task\.sleep\(for:\s*\.milliseconds\(((?:[^()]|\([^()]*\))*)\)\)"),
+        lambda m: f"Task.sleep(nanoseconds: UInt64(({m.group(1)}) * 1_000_000))",
+    ),
+    (
+        re.compile(r"Task\.sleep\(for:\s*\.seconds\(((?:[^()]|\([^()]*\))*)\)\)"),
+        lambda m: f"Task.sleep(nanoseconds: UInt64(({m.group(1)}) * 1_000_000_000))",
+    ),
+    (re.compile(r"Task\.sleep\(for:\s*step\.2\)"), lambda m: "Task.sleep(nanoseconds: UInt64(step.2))"),
+    (re.compile(r"(?<![\d_])\.milliseconds\(([0-9]+)\)"), lambda m: f"UInt64({m.group(1)}) * 1_000_000"),
+    # a.duration(to: .now) < .seconds(x) -> 时间间隔比较
+    (
+        re.compile(r"([A-Za-z0-9_.]+)\.duration\(to:\s*\.now\)\s*<\s*\.seconds\(([^()]*)\)"),
+        lambda m: f"Date().timeIntervalSince({m.group(1)}) < ({m.group(2)})",
+    ),
+    (re.compile(r"= \((target),\s*\.now\)"), lambda m: f"= ({m.group(1)}, Date())"),
+    # LabeledContent -> 兼容实现
+    (re.compile(r"(?<!DY)LabeledContent"), lambda m: "DYLabeledContent"),
+    # AnyLayout -> 兼容规格
+    (
+        re.compile(r"AnyLayout\(VStackLayout\((?:alignment:\s*[^,)]+,?\s*)?spacing:\s*([^)]*)\)\)"),
+        lambda m: f"DYAnyLayoutSpec(vertical: true, spacing: {m.group(1)})",
+    ),
+    (
+        re.compile(r"AnyLayout\(HStackLayout\((?:alignment:\s*[^,)]+,?\s*)?spacing:\s*([^)]*)\)\)"),
+        lambda m: f"DYAnyLayoutSpec(vertical: false, spacing: {m.group(1)})",
+    ),
+    # .lineLimit(n, reservesSpace: true)
+    (re.compile(r"\.lineLimit\(([^,()]+), reservationspace:\s*true\)"), lambda m: f".lineLimit({m.group(1)})"),
+    (re.compile(r"\.lineLimit\(([^,()]+), reservesSpace:\s*true\)"), lambda m: f".lineLimit({m.group(1)})"),
+    # Text(...).foregroundStyle(...) -> foregroundColor
+    (re.compile(r"(Text\([^()]*\))\.foregroundStyle\("), lambda m: f"{m.group(1)}.foregroundColor("),
 ]
 
 TAB_RE = re.compile(
@@ -230,10 +278,11 @@ def main():
     proj = ROOT / "project.yml"
     if proj.exists():
         s = proj.read_text(encoding="utf-8")
-        s2 = s.replace('iOS: "26.0"', 'iOS: "15.0"').replace("iOS: '26.0'", 'iOS: "15.0"')
+        tgt = os.environ.get("DEPLOY_TARGET", "16.0")
+        s2 = re.sub(r'(iOS:\s*)[\'"]?[0-9]+(?:\.[0-9]+)*[\'"]?', lambda m: m.group(1) + '"' + tgt + '"', s, count=1)
         if s2 != s:
             proj.write_text(s2, encoding="utf-8")
-            print("[ok] project.yml deploymentTarget -> 15.0")
+            print(f"[ok] project.yml deploymentTarget -> {tgt}")
 
     # 2) 兼容层
     compat = None
@@ -264,8 +313,11 @@ def main():
             if a in raw:
                 raw = raw.replace(a, b)
 
-        raw, m = TAB_RE.subn(r'DYTab("\1", systemImage: "\2", value: \3)', raw)
+        raw, m = TAB_RE.subn(r'DYTabItem("\1", systemImage: "\2", value: \3)', raw)
         stat["tab"] += m
+
+        for rx, fn in REGEX_REPLACEMENTS:
+            raw = rx.sub(fn, raw)
 
         raw, names = convert_observables(raw)
         if names:
