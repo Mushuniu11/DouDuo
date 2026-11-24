@@ -51,8 +51,54 @@ STRIP_TOKENS = [
 ]
 
 
+def _skip_space(s: str, i: int) -> int:
+    while i < len(s) and s[i] in " \t\r\n":
+        i += 1
+    return i
+
+
+def _match_brace(s: str, i: int) -> int:
+    """i 指向 '{'，返回配对 '}' 的下标"""
+    depth = 0
+    quote = None
+    while i < len(s):
+        ch = s[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        else:
+            if ch == '"':
+                quote = '"'
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return i
+        i += 1
+    return i
+
+
+def _eat_trailing_closures(s: str, i: int) -> int:
+    """吃掉紧跟其后的尾随闭包 `{...}` 以及 `label: {...}` 形式"""
+    while True:
+        j = _skip_space(s, i)
+        if j < len(s) and s[j] == "{":
+            i = _match_brace(s, j) + 1
+            continue
+        m = re.match(r"[A-Za-z_][A-Za-z0-9_]*\s*:\s*\{", s[j:])
+        if m:
+            brace = j + m.end() - 1
+            i = _match_brace(s, brace) + 1
+            continue
+        return i
+
+
 def strip_segment(src: str, token: str) -> str:
-    """删除 `.token(...)` 整段调用（含括号内全部内容），保持链式调用合法。"""
+    """删除 `.token(...)` 整段调用（含尾随闭包），保持链式调用合法。"""
     out = []
     i = 0
     n = len(src)
@@ -61,7 +107,6 @@ def strip_segment(src: str, token: str) -> str:
         if j == -1:
             out.append(src[i:])
             break
-        # 必须紧跟在 . 之后（token 本身已带点）
         k = src.find("(", j)
         if k == -1:
             out.append(src[i : j + len(token)])
@@ -70,6 +115,7 @@ def strip_segment(src: str, token: str) -> str:
         depth = 0
         p = k
         quote = None
+        closed = False
         while p < n:
             ch = src[p]
             if quote:
@@ -86,10 +132,11 @@ def strip_segment(src: str, token: str) -> str:
                 elif ch == ")":
                     depth -= 1
                     if depth == 0:
+                        closed = True
                         break
             p += 1
         out.append(src[i:j])
-        i = p + 1
+        i = _eat_trailing_closures(src, p + 1) if closed else p + 1
     return "".join(out)
 
 
@@ -99,6 +146,7 @@ TEXT_REPLACEMENTS = [
     ("NavigationStack", "DYStack"),
     ("ContentUnavailableView(", "DYContentUnavailableView("),
     (".buttonStyle(.glass)", ".buttonStyle(.plain)"),
+    ("@Bindable ", "@ObservedObject "),
 ]
 
 TAB_RE = re.compile(
