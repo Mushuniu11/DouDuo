@@ -65,6 +65,7 @@ STRIP_TOKENS = [
     ".onHingeChange",
     ".coordinateSpace",
     ".toolbarVisibility",
+    ".toolbarBackgroundVisibility",
 ]
 
 
@@ -186,6 +187,15 @@ TEXT_REPLACEMENTS = [
 ]
 
 BLOCK_FIXES = [
+    # ToolbarContent 上的 .hidden(...)（iOS 26 专属）
+    (
+        re.compile(r"\.hidden\(onBack == nil[^\n]*\)"),
+        "",
+    ),
+    (
+        re.compile(r"\.hidden\(actions == nil \|\| verticalEdge == nil \|\| isClean\)"),
+        "",
+    ),
     # 裸调用形态的 iOS 26/27 修饰符（在 if 分支开头，没有前导点）
     (
         re.compile(r"\n[ \t]*toolbarVisibility\([^\n]*\)"),
@@ -222,11 +232,11 @@ REGEX_REPLACEMENTS = [
     # Task.sleep(for: .milliseconds(x)) -> nanoseconds
     (
         re.compile(r"Task\.sleep\(for:\s*\.milliseconds\(((?:[^()]|\([^()]*\))*)\)\)"),
-        lambda m: f"Task.sleep(nanoseconds: UInt64(({m.group(1)}) * 1_000_000))",
+        lambda m: f"Task.sleep(nanoseconds: UInt64({m.group(1)}) * 1_000_000)",
     ),
     (
         re.compile(r"Task\.sleep\(for:\s*\.seconds\(((?:[^()]|\([^()]*\))*)\)\)"),
-        lambda m: f"Task.sleep(nanoseconds: UInt64(({m.group(1)}) * 1_000_000_000))",
+        lambda m: f"Task.sleep(nanoseconds: UInt64({m.group(1)}) * 1_000_000_000)",
     ),
     (re.compile(r"Task\.sleep\(for:\s*step\.2\)"), lambda m: "Task.sleep(nanoseconds: UInt64(step.2))"),
     (re.compile(r"(?<![\d_])\.milliseconds\(([0-9]+)\)"), lambda m: f"UInt64({m.group(1)}) * 1_000_000"),

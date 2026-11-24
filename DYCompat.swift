@@ -51,6 +51,15 @@ extension View {
     ) -> some View {
         modifier(DYOnChangeCompatBox(value: value, initial: initial, action: { _, new in action(new) }))
     }
+
+    /// 无参数版本：`{ doSomething() }`
+    func onChangeCompat<V: Equatable>(
+        of value: V,
+        initial: Bool = false,
+        _ action: @escaping () -> Void
+    ) -> some View {
+        modifier(DYOnChangeCompatBox(value: value, initial: initial, action: { _, _ in action() }))
+    }
 }
 
 // MARK: - Scene 上的 onChange（WindowGroup 不是 View，需单独提供）
