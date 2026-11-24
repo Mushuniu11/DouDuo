@@ -57,6 +57,14 @@ STRIP_TOKENS = [
     ".symbolEffect",
     ".containerBackground",
     ".backgroundStyle",
+    ".toolbarVerticalBehavior",
+    ".toolbarVerticalCompressionBehavior",
+    ".toolbarMinimizationBehavior",
+    ".axisBehavior",
+    ".visibilityPriority",
+    ".onHingeChange",
+    ".coordinateSpace",
+    ".toolbarVisibility",
 ]
 
 
@@ -159,6 +167,47 @@ TEXT_REPLACEMENTS = [
     ("Mutex(", "DYMutex("),
     ("Mutex<", "DYMutex<"),
     ("URL.temporaryDirectory", "FileManager.default.temporaryDirectory"),
+    ("[(CGFloat, CGFloat, Duration)]", "[(CGFloat, CGFloat, UInt64)]"),
+    ("fill(.separator)", "fill(Color(UIColor.separator))"),
+    (".buttonStyle(.glassProminent)", ".buttonStyle(.borderedProminent)"),
+    ("accent.mix(with: .white, by: 0.4)", "accent"),
+    ("@ContentBuilder", "@ViewBuilder"),
+    ("ContinuousClock.Instant", "Date"),
+    (", layoutDirectionBehavior: .fixed", ""),
+    (", .bottomBar)", ")"),
+]
+
+BLOCK_FIXES = [
+    # 裸调用形态的 iOS 26/27 修饰符（在 if 分支开头，没有前导点）
+    (
+        re.compile(r"\n[ \t]*toolbarVisibility\([^\n]*\)"),
+        "",
+    ),
+    # 直播：折痕状态（DeviceHinge 只存在于 iOS 27 SDK）
+    (
+        re.compile(r"@available\(iOS 27\.1, \*\)\nprivate func dyLiveHingeStatus[\s\S]*?\n\}\n"),
+        "",
+    ),
+    (
+        re.compile(
+            r"if #available\(iOS 27\.1, \*\) \{\s*\n\s*onHingeChange \{ _, context in apply\(dyLiveHingeStatus\(context\.hinge\)\) \}\s*\n\s*\} else \{\s*\n\s*self\s*\n\s*\}",
+            re.M,
+        ),
+        "        self",
+    ),
+    # 导航栏：UITab / selectedTab / shouldSelectTab 仅 iOS 18+
+    (
+        re.compile(
+            r"\n\s*func tabBarController\(_ controller: UITabBarController, shouldSelectTab tab: UITab\) -> Bool \{[\s\S]*?\n        \}\n",
+            re.M,
+        ),
+        "\n",
+    ),
+    # 关注元数据缓存：私有成员导致 memberwise init 不可见
+    (
+        re.compile(r"(struct DYFollowMetadataCache \{\n\s+var ttl: TimeInterval)"),
+        lambda m: m.group(1) + "\n\n    init(ttl: TimeInterval) { self.ttl = ttl }",
+    ),
 ]
 
 REGEX_REPLACEMENTS = [
@@ -317,6 +366,9 @@ def main():
         stat["tab"] += m
 
         for rx, fn in REGEX_REPLACEMENTS:
+            raw = rx.sub(fn, raw)
+
+        for rx, fn in BLOCK_FIXES:
             raw = rx.sub(fn, raw)
 
         raw, names = convert_observables(raw)

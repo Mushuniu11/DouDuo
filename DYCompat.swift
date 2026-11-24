@@ -53,6 +53,25 @@ extension View {
     }
 }
 
+// MARK: - Scene 上的 onChange（WindowGroup 不是 View，需单独提供）
+
+extension WindowGroup where Content: View {
+    func onChangeCompat<V: Equatable>(of value: V, _ action: @escaping (V, V) -> Void) -> some Scene {
+        self.onChange(of: value) { newValue in
+            action(newValue, newValue)
+        }
+    }
+}
+
+// MARK: - iOS 27 的 toolbarVerticalEdge（低版本一律视为无竖栏）
+
+extension EnvironmentValues {
+    var toolbarVerticalEdge: HorizontalEdge? {
+        get { nil }
+        set { }
+    }
+}
+
 // MARK: - NavigationStack -> NavigationView（强制 stack 样式，避免 iPad 分栏）
 
 struct DYStack<Content: View>: View {
@@ -104,6 +123,13 @@ struct DYContentUnavailableView<Actions: View>: View {
         self.title = title
         self.systemImage = systemImage
         self.description = nil
+        self.actions = EmptyView()
+    }
+
+    init(_ title: String, systemImage: String, description: Text) where Actions == EmptyView {
+        self.title = title
+        self.systemImage = systemImage
+        self.description = description
         self.actions = EmptyView()
     }
 
