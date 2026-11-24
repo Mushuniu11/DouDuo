@@ -420,8 +420,152 @@ def main():
             if touched:
                 path.write_text("\n".join(lines), encoding="utf-8")
 
+    # 5) 拆超长 body（Swift 编译器 type-check 超时兜底）
+    names = os.environ.get("SPLIT_BODY_FILES", "DouyinFeedView.swift")
+    for name in [x.strip() for x in names.split(",") if x.strip()]:
+        for path in APP.rglob(name):
+            if path.name == "DYCompat.swift":
+                continue
+            n = split_long_body(path)
+            if n:
+                print(f"[ok] 拆分超长 body: {path.name} -> {n} 个 bodyStage")
+
     print(f"[ok] 改造完成: 文件 {stat['files']} 个, 修饰符段 {stat['strip']}, Tab {stat['tab']}, @Observable {stat['obs']}")
     print(f"[i] 发现的 @Observable 类: {sorted(obs_names)}")
+
+
+def scan_code(text):
+    """标记每个字符是否属于代码（排除字符串与注释）"""
+    n = len(text)
+    code = [True] * n
+    i = 0
+    while i < n:
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j == -1 else j
+            for k in range(i, j):
+                code[k] = False
+            i = j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j == -1 else j + 2
+            for k in range(i, j):
+                code[k] = False
+            i = j
+        elif text[i] == '"':
+            if text.startswith('"""', i):
+                j = text.find('"""', i + 3)
+                j = n if j == -1 else j + 3
+            else:
+                j = i + 1
+                while j < n:
+                    if text[j] == "\\":
+                        j += 2
+                        continue
+                    if text[j] == '"':
+                        j += 1
+                        break
+                    j += 1
+            for k in range(i, min(j, n)):
+                code[k] = False
+            i = j
+        else:
+            i += 1
+    return code
+
+
+def brace_delta_line(line):
+    s = line.strip()
+    if not s or s.startswith("//"):
+        return 0
+    return re.sub(r'"(?:[^"\\]|\\.)*"', '""', s).count("{") - re.sub(r'"(?:[^"\\]|\\.)*"', '""', s).count("}")
+
+
+def split_long_body(path, max_lines=70, min_body=200):
+    """把超长 var body 拆成 bodyStageN 链式计算属性。
+    只在 body 内顶层语句数为 1（纯修饰符链）时生效，避免语义变化。"""
+    text = path.read_text(encoding="utf-8")
+    if "bodyStage" in text:
+        return 0
+    code = scan_code(text)
+    lines = text.split("\n")
+    offs, p = [], 0
+    for ln in lines:
+        offs.append(p)
+        p += len(ln) + 1
+
+    out, i, stage, changed = [], 0, 0, 0
+    while i < len(lines):
+        line = lines[i]
+        m = re.match(r"^(\s*)(?:override\s+)?var\s+body\s*:\s*some\s+View\s*\{\s*$", line)
+        if not m:
+            out.append(line)
+            i += 1
+            continue
+        indent = m.group(1)
+        depth, end, pos = 1, None, offs[i] + len(line)
+        while pos < len(text):
+            if code[pos]:
+                ch = text[pos]
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = text.count("\n", 0, pos)
+                        break
+            pos += 1
+        if end is None or (end - i) < min_body:
+            out.append(line)
+            i += 1
+            continue
+
+        inner = lines[i + 1:end]
+        d, cuts, stmt = 0, [], 0
+        for k, ln in enumerate(inner):
+            s = ln.strip()
+            if d == 0 and s and not s.startswith("//"):
+                if re.match(r"^\.[A-Za-z_]", s):
+                    cuts.append(k)
+                elif re.match(r"^" + indent + r"[ ]{4}[^ .]", ln):
+                    stmt += 1
+            d += brace_delta_line(ln)
+        if stmt != 1 or not cuts:
+            out.append(line)
+            i += 1
+            continue
+        chosen, last = [], 0
+        for k in cuts:
+            if k - last >= max_lines:
+                chosen.append(k)
+                last = k
+        if not chosen:
+            out.append(line)
+            i += 1
+            continue
+        chunks, prev = [], 0
+        for c in chosen:
+            chunks.append(inner[prev:c])
+            prev = c
+        chunks.append(inner[prev:])
+        for n, ch in enumerate(chunks):
+            stage += 1
+            out.append(f"{indent}private var bodyStage{stage}: some View {{")
+            if n > 0:
+                out.append(f"{indent}    bodyStage{stage - 1}")
+            out.extend(ch)
+            out.append(f"{indent}}}")
+            out.append("")
+        out.pop()
+        out.append(f"{indent}var body: some View {{")
+        out.append(f"{indent}    bodyStage{stage}")
+        out.append(f"{indent}}}")
+        i = end + 1
+        changed += 1
+
+    if changed:
+        path.write_text("\n".join(out), encoding="utf-8")
+    return stage
 
 
 if __name__ == "__main__":
