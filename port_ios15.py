@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+port_ios15.py — 在 CI 里把 DouDuo 从 iOS 26 部署目标机械降级到 iOS 15。
+
+做什么：
+  1) project.yml 部署目标 26.0 -> 15.0
+  2) 注入兼容层 scripts/DYCompat.swift 到 DouDuo/
+  3) 删除 / 替换 iOS 16+ 才有的 SwiftUI API（视觉降级，功能保留）
+  4) NavigationStack -> DYStack(NavigationView)
+  5) Tab(value:) -> DYTab(tabItem + tag)
+  6) ContentUnavailableView -> DYContentUnavailableView
+  7) onChange 双参 -> onChangeCompat
+  8) @Observable -> ObservableObject + @Published
+
+用法：python3 scripts/port_ios15.py [repo_root]
+"""
+
+import os
+import re
+import shutil
+import sys
+import pathlib
+
+ROOT = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
+APP = ROOT / "DouDuo"
+
+STRIP_TOKENS = [
+    ".glassEffect",
+    ".scrollIndicators",
+    ".scrollContentBackground",
+    ".toolbarBackground",
+    ".scrollEdgeEffectHidden",
+    ".scrollEdgeEffectStyle",
+    ".scrollClipDisabled",
+    ".scrollBounceBehavior",
+    ".containerRelativeFrame",
+    ".scrollTargetLayout",
+    ".scrollTargetBehavior",
+    ".scrollPosition",
+    ".safeAreaPadding",
+    ".contentTransition",
+    ".sensoryFeedback",
+    ".presentationDetents",
+    ".presentationCornerRadius",
+    ".onScrollGeometryChange",
+    ".tabBarMinimizeBehavior",
+    ".scrollTransition",
+    ".visualEffect",
+    ".defaultScrollAnchor",
+]
+
+
+def strip_segment(src: str, token: str) -> str:
+    """删除 `.token(...)` 整段调用（含括号内全部内容），保持链式调用合法。"""
+    out = []
+    i = 0
+    n = len(src)
+    while True:
+        j = src.find(token, i)
+        if j == -1:
+            out.append(src[i:])
+            break
+        # 必须紧跟在 . 之后（token 本身已带点）
+        k = src.find("(", j)
+        if k == -1:
+            out.append(src[i : j + len(token)])
+            i = j + len(token)
+            continue
+        depth = 0
+        p = k
+        quote = None
+        while p < n:
+            ch = src[p]
+            if quote:
+                if ch == "\\":
+                    p += 2
+                    continue
+                if ch == quote:
+                    quote = None
+            else:
+                if ch == '"':
+                    quote = '"'
+                elif ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+            p += 1
+        out.append(src[i:j])
+        i = p + 1
+    return "".join(out)
+
+
+TEXT_REPLACEMENTS = [
+    (".onChange(of:", ".onChangeCompat(of:"),
+    ("NavigationStack(", "DYStack("),
+    ("NavigationStack", "DYStack"),
+    ("ContentUnavailableView(", "DYContentUnavailableView("),
+    (".buttonStyle(.glass)", ".buttonStyle(.plain)"),
+]
+
+TAB_RE = re.compile(
+    r'Tab\("([^"]+)",\s*systemImage:\s*"([^"]+)",\s*value:\s*([A-Za-z0-9_.]+)\)'
+)
+
+OBSERVABLE_RE = re.compile(r"@Observable\s*")
+
+
+def convert_observables(text: str):
+    """@Observable -> ObservableObject + @Published，返回 (新文本, 类名列表)"""
+    if "@Observable" not in text:
+        return text, []
+
+    # 先记下每个 @Observable 后面紧跟的 class 名（只改这些类，别误伤同文件其它类）
+    names = []
+    for m in OBSERVABLE_RE.finditer(text):
+        nxt = text[m.end() : m.end() + 400]
+        cm = re.search(r"class[ \t]+([A-Za-z0-9_]+)", nxt)
+        if cm and cm.group(1) not in names:
+            names.append(cm.group(1))
+
+    text = OBSERVABLE_RE.sub("", text)
+    text = text.replace("@ObservationIgnored ", "").replace("@ObservationIgnored", "")
+
+    decl_tpl = re.compile(
+        r"(?m)^([ \t]*)((?:@\w+[ \t]+)*(?:final[ \t]+)?)class[ \t]+("
+        + "|".join(re.escape(n) for n in names)
+        + r")[ \t]*(?::([^\n{]*))?[ \t]*\{"
+    )
+
+    def decl_sub(m):
+        indent, attrs, name, inherits = m.group(1), m.group(2), m.group(3), m.group(4)
+        tail = (
+            f": ObservableObject, {inherits.strip()}"
+            if inherits and inherits.strip()
+            else ": ObservableObject"
+        )
+        return f"{indent}{attrs}class {name}{tail} {{"
+
+    text = decl_tpl.sub(decl_sub, text)
+
+    # 给类里一层的存储属性加 @Published
+    for name in names:
+        body_re = re.compile(
+            r"class[ \t]+" + re.escape(name) + r"[^\{]*\{"
+        )
+        mm = body_re.search(text)
+        if not mm:
+            continue
+        start = mm.end() - 1
+        depth = 0
+        end = start
+        for p in range(start, len(text)):
+            if text[p] == "{":
+                depth += 1
+            elif text[p] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = p
+                    break
+        body = text[start + 1 : end]
+        new_lines = []
+        inner = 0
+        for line in body.split("\n"):
+            st = line.strip()
+            if inner == 0 and re.match(r"^\s+(?:@\w+[^\n]*\s+)?(?:private\(set\)\s+)?var\s+[A-Za-z0-9_]", line):
+                if not st.endswith("{") and "{" not in st and "didSet" not in st:
+                    line = re.sub(r"^(\s+)", r"\1@Published ", line, count=1)
+            inner += line.count("{") - line.count("}")
+            new_lines.append(line)
+        text = text[: start + 1] + "\n".join(new_lines) + text[end:]
+    return text, names
+
+
+def main():
+    if not APP.is_dir():
+        sys.exit(f"找不到源码目录: {APP}")
+
+    # 1) 部署目标
+    proj = ROOT / "project.yml"
+    if proj.exists():
+        s = proj.read_text(encoding="utf-8")
+        s2 = s.replace('iOS: "26.0"', 'iOS: "15.0"').replace("iOS: '26.0'", 'iOS: "15.0"')
+        if s2 != s:
+            proj.write_text(s2, encoding="utf-8")
+            print("[ok] project.yml deploymentTarget -> 15.0")
+
+    # 2) 兼容层
+    compat = None
+    for cand in (ROOT / "DYCompat.swift", ROOT / "scripts" / "DYCompat.swift"):
+        if cand.exists():
+            compat = cand
+            break
+    if compat is not None:
+        shutil.copy(compat, APP / "DYCompat.swift")
+        print(f"[ok] 注入 DYCompat.swift (来自 {compat})")
+
+    # 3) 逐文件改造
+    stat = {"strip": 0, "tab": 0, "obs": 0, "files": 0}
+    obs_names = set()
+
+    for path in sorted(APP.rglob("*.swift")):
+        if path.name == "DYCompat.swift":
+            continue
+        raw = path.read_text(encoding="utf-8")
+        orig = raw
+
+        for token in STRIP_TOKENS:
+            if token in raw:
+                raw = strip_segment(raw, token)
+                stat["strip"] += 1
+
+        for a, b in TEXT_REPLACEMENTS:
+            if a in raw:
+                raw = raw.replace(a, b)
+
+        raw, m = TAB_RE.subn(r'DYTab("\1", systemImage: "\2", value: \3)', raw)
+        stat["tab"] += m
+
+        raw, names = convert_observables(raw)
+        if names:
+            obs_names.update(names)
+            stat["obs"] += 1
+
+        if raw != orig:
+            path.write_text(raw, encoding="utf-8")
+            stat["files"] += 1
+
+    # 4) @State -> @StateObject（只针对持有 @Observable 模型的地方）
+    for name in sorted(obs_names):
+        for path in APP.rglob("*.swift"):
+            if path.name == "DYCompat.swift":
+                continue
+            s = path.read_text(encoding="utf-8")
+            lines = s.split("\n")
+            touched = False
+            for i, line in enumerate(lines):
+                if "@State private var" not in line:
+                    continue
+                if (f"= {name}(" in line) or (f"= .init(" in line and f": {name}" in line) or (f": {name} =" in line):
+                    lines[i] = line.replace("@State private var", "@StateObject private var", 1)
+                    touched = True
+            if touched:
+                path.write_text("\n".join(lines), encoding="utf-8")
+
+    print(f"[ok] 改造完成: 文件 {stat['files']} 个, 修饰符段 {stat['strip']}, Tab {stat['tab']}, @Observable {stat['obs']}")
+    print(f"[i] 发现的 @Observable 类: {sorted(obs_names)}")
+
+
+if __name__ == "__main__":
+    main()
