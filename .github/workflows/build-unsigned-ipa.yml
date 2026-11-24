@@ -1,8 +1,5 @@
 name: build-unsigned-ipa
 
-# 云端编译：用 GitHub 的 macOS 26 机器（自带 Xcode 26 / iOS 26 SDK）编出未签名 IPA。
-# 产物在 Actions 的 Artifacts 里，下载后可直接用巨魔安装，不需要证书和 Apple ID。
-
 on:
   workflow_dispatch:
   push:
@@ -11,17 +8,14 @@ on:
 jobs:
   build:
     runs-on: macos-26
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
-      - name: Show Xcode
+      - name: Toolchain
         run: |
           xcodebuild -version
-          ls /Applications | grep -i xcode
-
-      - name: Install xcodegen
-        run: brew install xcodegen
+          brew install xcodegen
 
       - name: Cache VLCKit
         uses: actions/cache@v4
@@ -30,38 +24,32 @@ jobs:
           key: vlckit-3.6.0
 
       - name: Fetch VLCKit
+        run: bash scripts/fetch-vlckit.sh
+
+      - name: Port to iOS 15
         run: |
-          if [ -x scripts/fetch-vlckit.sh ]; then bash scripts/fetch-vlckit.sh; fi
+          python3 port_ios15.py .
+          grep -A2 deploymentTarget project.yml
 
       - name: Generate Xcode project
-        shell: bash
-        run: |
-          if [ -f project-ios15.yml ]; then
-            xcodegen generate --spec project-ios15.yml
-          else
-            xcodegen generate
-          fi
+        run: xcodegen generate
 
       - name: Build
         shell: bash
         run: |
           set -o pipefail
-          xcodebuild -project DouDuo.xcodeproj -scheme DouDuo -configuration Release \
-            -sdk iphoneos -destination 'generic/platform=iOS' \
-            -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            build 2>&1 | tee build.log | tail -n 200
+          xcodebuild -project DouDuo.xcodeproj -scheme DouDuo -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build 2>&1 | tee build.log
+          rc=${PIPESTATUS[0]}
+          echo "---- first errors ----"
+          grep -E "error:" build.log | head -n 200 || true
+          exit $rc
 
-      - name: Package unsigned IPA
+      - name: Package IPA
         if: success()
-        shell: bash
         run: |
-          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)
-          echo "app=$APP"
-          rm -rf Payload
           mkdir -p Payload
-          cp -R "$APP" Payload/
-          cd Payload && zip -qry ../DouDuo-unsigned.ipa . && cd ..
+          cp -R build/Build/Products/Release-iphoneos/DouDuo.app Payload/
+          zip -qry DouDuo-unsigned.ipa Payload
           ls -la DouDuo-unsigned.ipa
 
       - name: Upload IPA
