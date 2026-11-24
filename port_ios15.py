@@ -115,7 +115,11 @@ def _eat_trailing_closures(s: str, i: int) -> int:
 
 
 def strip_segment(src: str, token: str) -> str:
-    """删除 `.token(...)` 整段调用（含尾随闭包），保持链式调用合法。"""
+    """删除 `.token(...)` / `.token { ... }` 整段调用，保持链式调用合法。
+
+    关键：括号必须紧跟 token（只允许空白），否则说明这不是这个 API 的调用，
+    绝不能去后面随便找一个 `(` 就把整段吃掉。
+    """
     out = []
     i = 0
     n = len(src)
@@ -124,36 +128,40 @@ def strip_segment(src: str, token: str) -> str:
         if j == -1:
             out.append(src[i:])
             break
-        k = src.find("(", j)
-        if k == -1:
+        k = _skip_space(src, j + len(token))
+        if k < n and src[k] == "(":
+            depth = 0
+            p = k
+            quote = None
+            closed = False
+            while p < n:
+                ch = src[p]
+                if quote:
+                    if ch == "\\":
+                        p += 2
+                        continue
+                    if ch == quote:
+                        quote = None
+                else:
+                    if ch == '"':
+                        quote = '"'
+                    elif ch == "(":
+                        depth += 1
+                    elif ch == ")":
+                        depth -= 1
+                        if depth == 0:
+                            closed = True
+                            break
+                p += 1
+            out.append(src[i:j])
+            i = _eat_trailing_closures(src, p + 1) if closed else p + 1
+        elif k < n and src[k] == "{":
+            close = _match_brace(src, k)
+            out.append(src[i:j])
+            i = _eat_trailing_closures(src, close + 1)
+        else:
             out.append(src[i : j + len(token)])
             i = j + len(token)
-            continue
-        depth = 0
-        p = k
-        quote = None
-        closed = False
-        while p < n:
-            ch = src[p]
-            if quote:
-                if ch == "\\":
-                    p += 2
-                    continue
-                if ch == quote:
-                    quote = None
-            else:
-                if ch == '"':
-                    quote = '"'
-                elif ch == "(":
-                    depth += 1
-                elif ch == ")":
-                    depth -= 1
-                    if depth == 0:
-                        closed = True
-                        break
-            p += 1
-        out.append(src[i:j])
-        i = _eat_trailing_closures(src, p + 1) if closed else p + 1
     return "".join(out)
 
 
